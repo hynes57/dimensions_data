@@ -1,4 +1,5 @@
-import boto3, dimcli, json, logging, time #retrying
+import boto3, dimcli, json, logging, time #, #retrying
+from requests.exceptions import HTTPError
 
 # CLIENTS
 s3 = boto3.client('s3')
@@ -42,11 +43,17 @@ def get_total_records(dimensions_client, data_type):
     data = dimensions_client.query(f"search {data_type} return {data_type}[id] limit 1")
     return data.data['_stats']['total_count']
 
-#@retry(stop_max_attempt_number=3, wait_fixed=2000)
+def retry_if_timeout_error(exception):
+    """Return True if we should retry (in this case when it's a 408 Timeout Error), False otherwise"""
+    return isinstance(exception, HTTPError) and exception.response.status_code == 408
+
+#@retry(stop_max_attempt_number=3, wait_fixed=10000, retry_on_exception=retry_if_timeout_error)
 def process_batch(s3_client, dimensions_client, data_type, country, year, checkpoint_data, bucket_name):
+    max_retries = 3
+    retry_delay = 10 #seconds
 
     conditions_dict = {
-        "clinical_trials" : f"(funder_countries=\"{country}\")",
+        "clinical_trials" : f"(funder_countries=\"{country}\" and (start_date>=\"{str(year)}-01-01\" and start_date<=\"{str(year)}-12-31\"))",
         "datasets" : f"(funder_countries=\"{country}\" or research_org_countries=\"{country}\") and year={year}",
         "grants" : f"(funder_org_countries=\"{country}\" or research_org_countries=\"{country}\") and start_year={year})",
         "patents" : f"(assignee_countries=\"{country}\" or funder_countries=\"{country}\" or inventor_countries=\"{country}\") and year={year})",
@@ -56,34 +63,57 @@ def process_batch(s3_client, dimensions_client, data_type, country, year, checkp
         "source_titles" : f"(start_year={year})"
     }
 
-    try:
-        # Replace with your method of fetching data from the API
-        query = f"search {data_type} where {conditions_dict[data_type]} return {data_type}[{fields_dict[data_type]}] limit {requests_per_batch} skip {checkpoint_data['types_progress'][data_type]['skip']}"
-        #logging.info(f"Querying {data_type} for {country}, {year} with query: {query}")
-        data = dimensions_client.query(f"search {data_type} where {conditions_dict[data_type]} return {data_type}[{fields_dict[data_type]}] limit {requests_per_batch} skip {checkpoint_data['types_progress'][data_type]['skip']}")
+    for attempt in range(max_retries):
+        try:
+            query = f"search {data_type} where {conditions_dict[data_type]} return {data_type}[{fields_dict[data_type]}] limit {requests_per_batch} skip {checkpoint_data['types_progress'][data_type]['skip']}"
+            #logging.info(f"Querying {data_type} for {country}, {year} with query: \r\n{query}")
+            data = dimensions_client.query(query)
 
-        # Check query size
-        data_count = data.data['_stats']['total_count']
-        if data_count > query_limit:
-            logging.warning(f"Query size for {data_type}, {country}, {year} exceeds 50,000 records")
-            checkpoint_data["oversized_queries"].append({'type': data_type, 'country': country, 'year': year, 'count': data_count})
-            return  # Skip further processing for this batch
-        
-        if data_count == 0:
-            logging.info(f"No records found for {data_type}, {country}, {year}")
-            return  # Skip further processing for this batch
+            if 'errors' in data.data.keys(): 
+                error = data['errors']['query']['header']
+                logging.warning(f"Error {data_type}, {country}, {year}. Error: {error}")
+                checkpoint_data["error_queries"].append({'type': data_type, 'country': country, 'year': year, 'query': query, 'error': error})
+                return  # Skip further processing for this batch
 
-        # Convert data to JSONL string
-        jsonl_data = "\n".join(json.dumps(record) for record in data.data[data_type])
-        
-        # Upload to S3
-        path = f"{data_type}/{data_type}_{country}_{year}_{checkpoint_data['types_progress'][data_type]['batch_number']}.jsonl"
-        s3_client.put_object(Body=jsonl_data, Bucket=bucket_name, Key=path)
-        logging.info(f"Successfully uploaded {data_type}, batch {checkpoint_data['types_progress'][data_type]['batch_number']} to S3 at {path}")
+            # Check query size
+            data_count = data.data['_stats']['total_count']
+            checkpoint_data["types_progress"][data_type]["total_records"] = data_count
 
-    except Exception as e:
-        logging.error(f"Error processing batch {checkpoint_data['types_progress'][data_type]['batch_number']} for {data_type}: {e}")
-        raise  # Reraise the exception to trigger a retry
+            if data_count > query_limit:
+                logging.warning(f"Query size for {data_type}, {country}, {year} exceeds 50,000 records")
+                checkpoint_data["oversized_queries"].append({'type': data_type, 'country': country, 'year': year, 'query': query})
+                return  # Skip further processing for this batch
+            
+            if data_count == 0:
+                logging.info(f"No records found for {data_type}, {country}, {year}")
+                return  # Skip further processing for this batch
+
+            # Convert data to JSONL string
+            jsonl_data = "\n".join(json.dumps(record) for record in data.data[data_type])
+            
+            # Upload to S3
+            path = f"{data_type}/{data_type}_{country}_{year}_{checkpoint_data['types_progress'][data_type]['batch_number']}.jsonl"
+            s3_client.put_object(Body=jsonl_data, Bucket=bucket_name, Key=path)
+            logging.info(f"Successfully uploaded {data_type}, batch {checkpoint_data['types_progress'][data_type]['batch_number']} to S3 at {path}")
+            break  # Break out of retry loop if successful
+
+        except HTTPError as http_err:
+            if http_err.response.status_code == 408:
+                logging.warning(f"Timeout error for {data_type}, {country}, {year} on attempt {attempt + 1}: {http_err}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)  # Wait before retrying
+                    continue
+                else:
+                    logging.warning(f"Skipping due to error for {data_type}, {country}, {year}. Error: 408")
+                    checkpoint_data["error_queries"].append({'type': data_type, 'country': country, 'year': year, 'query': query, 'error': 408})
+                    continue  # Skip further processing for this batch
+            else:
+                logging.error(f"HTTP error processing batch {checkpoint_data['types_progress'][data_type]['batch_number']} for {data_type}: {http_err}")
+                raise
+
+        except Exception as e:
+            logging.error(f"Error processing batch {checkpoint_data['types_progress'][data_type]['batch_number']} for {data_type}: {e}")
+            raise  # Reraise the exception for other errors
 
 def save_to_s3(s3_client, data, bucket_name, path):
     s3_client.put_object(Body=data, Bucket=bucket_name, Key=path)
@@ -112,13 +142,15 @@ for data_type in checkpoint_data["types_progress"]:
 
     current_type = data_type
     progress = checkpoint_data["types_progress"][current_type]
+    min_year = progress.get("min_year", 2000)  # Default to 2000 if not set
+    max_year = progress.get("max_year", 2023)  # Default to current year if not set
 
     last_processed_country = progress.get("last_processed_country", None)
     last_processed_year = progress.get("current_year", None)
     #progress['total_records'] = get_total_records(dsl, current_type)
     #logging.info(f"Processing {progress['total_records']} records for {current_type}")
 
-    for year in range(2000, 2030):
+    for year in range(min_year, max_year + 1): # fyi - range is exclusive of the last number
         if year < last_processed_year:
             continue
         #checkpoint_data["types_progress"][current_type]["current_year"] = year
@@ -137,7 +169,7 @@ for data_type in checkpoint_data["types_progress"]:
                 progress["skip"] += requests_per_batch  # Adjust based on batch size
                 checkpoint_data["types_progress"][current_type] = progress
                 checkpoint_data["current_type"] = current_type  # Update current type being processed
-                if progress["batch_number"] >= progress["total_records"] / requests_per_batch:
+                if progress["skip"] >= progress["total_records"]:
                     progress["completed"] = True
                 update_checkpoint(s3_client=s3, bucket_name=bucket_name, checkpoint_file=checkpoint_file, checkpoint_data=checkpoint_data)
 
@@ -147,10 +179,7 @@ for data_type in checkpoint_data["types_progress"]:
                     logging.info(f"Sleeping for {0.6 - elapsed_time} seconds to manage rate limit")
                     time.sleep(0.6 - elapsed_time)
 
-                logging.info(f"Completed batch {progress['batch_number']} for {current_type} for country: {country} for year: {year} in {elapsed_time} seconds")
-            
-            # Log completion of all batches for a country-year
-            logging.info(f"Completed processing {current_type} for {country}, {year}")
+                logging.info(f"Completed batch {progress['batch_number']-1} for {current_type} for country: {country} for year: {year} in {elapsed_time} seconds")
 
             # After completing all batches for the country-year, update the checkpoint
             progress["last_processed_country"] = country
