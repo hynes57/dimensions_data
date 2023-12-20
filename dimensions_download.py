@@ -4,10 +4,14 @@ from requests.exceptions import HTTPError
 # CLIENTS
 s3 = boto3.client('s3')
 
+sns = boto3.client('sns')
+
 dimcli.login(key="792DDFAFCCA7478D8F37159F274A2783", endpoint="https://app.dimensions.ai/api/dsl/v2")
 dsl = dimcli.Dsl()
 
 # GLOBALS
+phone_number = '+447709521591'
+topic_arn = 'arn:aws:sns:eu-west-2:713538054121:dimensions-download'
 bucket_name = 'sdl-dimensions'
 checkpoint_file = 'checkpoint.json'
 requests_per_batch = 1000
@@ -113,13 +117,34 @@ def process_batch(s3_client, dimensions_client, data_type, country, year, checkp
                     time.sleep(retry_delay)  # Wait before retrying
                     continue
                 else:
+                    sns.publish(
+                        #PhoneNumber=phone_number,
+                        TopicArn=topic_arn,
+                        Subject='Script Stopping - 502 Error',
+                        MessageStructure='string',
+                        Message=f"Script Stopping. 502 Bad Gateway error for {data_type}, {country}, {year} on attempt {attempt + 1}: {http_err}"
+                    )
                     raise  # Reraise the exception after final attempt
             else:
                 logging.error(f"HTTP error processing batch {checkpoint_data['types_progress'][data_type]['batch_number']} for {data_type}: {http_err}")
+                sns.publish(
+                    #PhoneNumber=phone_number,
+                    TopicArn=topic_arn,
+                    Subject=f'Script Stopping - {http_err} Error',
+                    MessageStructure='string',
+                    Message=f"Script Stopping. HTTP error processing batch {checkpoint_data['types_progress'][data_type]['batch_number']} for {data_type}: {http_err}"
+                )
                 raise
 
         except Exception as e:
             logging.error(f"Error processing batch {checkpoint_data['types_progress'][data_type]['batch_number']} for {data_type}: {e}")
+            sns.publish(
+                #PhoneNumber=phone_number,
+                TopicArn=topic_arn,
+                Subject='Script Stopping - Unhandled Error',
+                MessageStructure='string',
+                Message=f"Script Stopping. Error processing batch {checkpoint_data['types_progress'][data_type]['batch_number']} for {data_type}: {e}"
+            )
             raise  # Reraise the exception for other errors
 
 def save_to_s3(s3_client, data, bucket_name, path):
@@ -206,3 +231,10 @@ for data_type in checkpoint_data["types_progress"]:
     progress["completed"] = True
     update_checkpoint(s3_client=s3, bucket_name=bucket_name, checkpoint_file=checkpoint_file, checkpoint_data=checkpoint_data)
     logging.info(f"Completed processing all countries and years for {current_type}")
+    sns.publish(
+        #PhoneNumber=phone_number,
+        TopicArn=topic_arn,
+        Subject=f'{current_type} Complete',
+        MessageStructure='string',
+        Message=f"Completed processing all countries and years for {current_type}"
+    )
