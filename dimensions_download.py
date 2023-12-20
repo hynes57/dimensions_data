@@ -107,6 +107,13 @@ def process_batch(s3_client, dimensions_client, data_type, country, year, checkp
                     logging.warning(f"Skipping due to error for {data_type}, {country}, {year}. Error: 408")
                     checkpoint_data["error_queries"].append({'type': data_type, 'country': country, 'year': year, 'query': query, 'error': 408})
                     continue  # Skip further processing for this batch
+            elif http_err.response.status_code == 502:
+                logging.warning(f"502 Bad Gateway error for {data_type}, {country}, {year} on attempt {attempt + 1}: {http_err}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)  # Wait before retrying
+                    continue
+                else:
+                    raise  # Reraise the exception after final attempt
             else:
                 logging.error(f"HTTP error processing batch {checkpoint_data['types_progress'][data_type]['batch_number']} for {data_type}: {http_err}")
                 raise
@@ -199,7 +206,3 @@ for data_type in checkpoint_data["types_progress"]:
     progress["completed"] = True
     update_checkpoint(s3_client=s3, bucket_name=bucket_name, checkpoint_file=checkpoint_file, checkpoint_data=checkpoint_data)
     logging.info(f"Completed processing all countries and years for {current_type}")
-
-
-            
-
