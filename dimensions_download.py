@@ -55,7 +55,7 @@ def process_batch(s3_client, dimensions_client, data_type, country, year, checkp
     conditions_dict = {
         "clinical_trials" : f"(funder_countries=\"{country}\" and (start_date>=\"{str(year)}-01-01\" and start_date<=\"{str(year)}-12-31\"))",
         "datasets" : f"(funder_countries=\"{country}\" or research_org_countries=\"{country}\") and year={year}",
-        "grants" : f"(funder_org_countries=\"{country}\" or research_org_countries=\"{country}\") and start_year={year})",
+        "grants" : f"(funder_org_countries=\"{country}\" or research_org_countries=\"{country}\") and start_year={year}",
         "patents" : f"(assignee_countries=\"{country}\" or funder_countries=\"{country}\" or inventor_countries=\"{country}\") and year={year})",
         "policy_documents" : f"(publisher_org_country=\"{country}\" and year={year})",
         "publications" : f"(funder_countries=\"{country}\" or research_org_countries=\"{country}\") and year={year}",
