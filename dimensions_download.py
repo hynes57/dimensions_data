@@ -1,4 +1,4 @@
-import boto3, dimcli, json, logging, time #, #retrying
+import boto3, calendar, dimcli, json, logging, time  #, #retrying
 from requests.exceptions import HTTPError
 
 # CLIENTS
@@ -42,17 +42,22 @@ def read_checkpoint(s3_client, bucket_name, checkpoint_file):
         # If the checkpoint file does not exist, return None or an empty dictionary
         return None
 
-def get_total_records(dimensions_client, data_type):
-    # Replace with your method of fetching data from the API
-    data = dimensions_client.query(f"search {data_type} return {data_type}[id] limit 1")
-    return data.data['_stats']['total_count']
+def generate_monthly_date_ranges(year):
+    """Generate start and end date strings for each month in the given year."""
+    date_ranges = []
+    for month in range(1, 13):
+        start_date = f"{year}-{month:02d}-01"
+        end_day = calendar.monthrange(year, month)[1]  # Get the last day of the month
+        end_date = f"{year}-{month:02d}-{end_day}"
+        date_ranges.append((start_date, end_date))
+    return date_ranges
 
 def retry_if_timeout_error(exception):
     """Return True if we should retry (in this case when it's a 408 Timeout Error), False otherwise"""
     return isinstance(exception, HTTPError) and exception.response.status_code == 408
 
 #@retry(stop_max_attempt_number=3, wait_fixed=10000, retry_on_exception=retry_if_timeout_error)
-def process_batch(s3_client, dimensions_client, data_type, country, year, checkpoint_data, bucket_name):
+def process_batch(s3_client, dimensions_client, data_type, country, year, checkpoint_data, bucket_name, start_date=None, end_date=None):
     max_retries = 3
     retry_delay = 10 #seconds
 
@@ -60,9 +65,9 @@ def process_batch(s3_client, dimensions_client, data_type, country, year, checkp
         "clinical_trials" : f"(funder_countries=\"{country}\" and (start_date>=\"{str(year)}-01-01\" and start_date<=\"{str(year)}-12-31\"))",
         "datasets" : f"(funder_countries=\"{country}\" or research_org_countries=\"{country}\") and year={year}",
         "grants" : f"(funder_org_countries=\"{country}\" or research_org_countries=\"{country}\") and start_year={year}",
-        "patents" : f"(assignee_countries=\"{country}\" or funder_countries=\"{country}\" or inventor_countries=\"{country}\") and year={year})",
+        "patents" : f"(assignee_countries=\"{country}\" or funder_countries=\"{country}\" or inventor_countries=\"{country}\") and (date>=\"{start_date}\" and date<=\"{end_date}\"))",
         "policy_documents" : f"(publisher_org_country=\"{country}\" and year={year})",
-        "publications" : f"(funder_countries=\"{country}\" or research_org_countries=\"{country}\") and year={year}",
+        "publications" : f"(funder_countries=\"{country}\" or research_org_countries=\"{country}\") and (date>=\"{start_date}\" and date<=\"{end_date}\")",
         "reports" : f"(funder_orgs_countries=\"{country}\" or publisher_orgs_countries=\"{country}\" or research_org_countries=\"{country}\" or responsible_orgs_countries=\"{country}\") and year={year}",
         "source_titles" : f"(start_year={year})"
     }
@@ -96,7 +101,10 @@ def process_batch(s3_client, dimensions_client, data_type, country, year, checkp
             jsonl_data = "\n".join(json.dumps(record) for record in data.data[data_type])
             
             # Upload to S3
-            path = f"{data_type}/{data_type}_{country}_{year}_{checkpoint_data['types_progress'][data_type]['batch_number']}.jsonl"
+            if start_date is None and end_date is None:
+                path = f"{data_type}/{data_type}_{country}_{year}_{checkpoint_data['types_progress'][data_type]['batch_number']}.jsonl"
+            else:
+                path = f"{data_type}/{data_type}_{country}_{year}_{checkpoint_data['types_progress'][data_type]['batch_number']}_{start_date}_{end_date}.jsonl"
             s3_client.put_object(Body=jsonl_data, Bucket=bucket_name, Key=path)
             logging.info(f"Successfully uploaded {data_type}, batch {checkpoint_data['types_progress'][data_type]['batch_number']} to S3 at {path}")
             break  # Break out of retry loop if successful
@@ -193,8 +201,16 @@ for data_type in checkpoint_data["types_progress"]:
             #checkpoint_data["types_progress"][current_type]["current_country"] = country
             while not progress["completed"]:
                 start_time = time.time()
-                
-                process_batch(s3_client=s3, dimensions_client=dsl, data_type=current_type, checkpoint_data=checkpoint_data, country=country, year=year, bucket_name=bucket_name)
+
+                if data_type in ["publications", "patents"]:
+                    monthly_date_ranges = generate_monthly_date_ranges(year)
+                    for start_date, end_date in monthly_date_ranges:
+                        where_clause = f"date>='{start_date}' and date<='{end_date}'"
+                        # Call process_batch with additional date range parameters
+                        process_batch(s3_client=s3, dimensions_client=dsl, data_type=current_type, country=country, year=year, start_date=start_date, end_date=end_date, checkpoint_data=checkpoint_data, bucket_name=bucket_name)
+
+                else:     
+                    process_batch(s3_client=s3, dimensions_client=dsl, data_type=current_type, checkpoint_data=checkpoint_data, country=country, year=year, bucket_name=bucket_name)
 
                 # Update checkpoint data and rate limit handling
                 progress["batch_number"] += 1
