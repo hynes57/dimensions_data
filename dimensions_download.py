@@ -16,7 +16,29 @@ bucket_name = 'sdl-dimensions'
 checkpoint_file = 'checkpoint.json'
 requests_per_batch = 1000
 query_limit = 50000
-countries = ["AL", "AD", "AM", "AT", "AZ", "BY", "BE", "BA", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "GE", "DE", "GR", "HU", "IS", "IE", "IT", "KZ", "XK", "LV", "LI", "LT", "LU", "MT", "MD", "MC", "ME", "NL", "MK", "NO", "PL", "PT", "RO", "RU", "SM", "RS", "SK", "SI", "ES", "SE", "CH", "TR", "UA", "GB", "VA"]
+countries = [
+    "AL", "AD", "AM", "AT", "AZ", "BY", "BE", "BA", "BG", "HR", "CY", "CZ", "DK", 
+    "EE", "FI", "FR", "GE", "DE", "GR", "HU", "IS", "IE", "IT", "KZ", "XK", "LV", 
+    "LI", "LT", "LU", "MT", "MD", "MC", "ME", "NL", "MK", "NO", "PL", "PT", "RO", 
+    "RU", "SM", "RS", "SK", "SI", "ES", "SE", "CH", "TR", "UA", "GB", "VA"
+    ]
+other_countries = [
+    "AF", "AX", "DZ", "AS", "AO", "AI", "AQ", "AG", "AR", "AW", "AU", "BS", "BH", "BD", "BB",
+    "BZ", "BJ", "BM", "BT", "BO", "BQ", "BW", "BV", "BR", "IO", "BN", "BF", "BI", "CV", "KH",
+    "CM", "CA", "KY", "CF", "TD", "CL", "CN", "CX", "CC", "CO", "KM", "CG", "CD", "CK", "CR",
+    "CI", "CU", "CW", "DJ", "DM", "DO", "EC", "EG", "SV", "GQ", "ER", "SZ", "ET", "FK", "FO",
+    "FJ", "GF", "PF", "TF", "GA", "GM", "GH", "GI", "GL", "GD", "GP", "GU", "GT", "GG", "GN",
+    "GW", "GY", "HT", "HM", "HN", "HK", "IN", "ID", "IR", "IQ", "IM", "IL", "JM", "JP", "JE",
+    "JO", "KE", "KI", "KP", "KR", "KW", "KG", "LA", "LB", "LS", "LR", "LY", "MO", "MG", "MW",
+    "MY", "MV", "ML", "MH", "MQ", "MR", "MU", "YT", "MX", "FM", "MN", "MS", "MA", "MZ", "MM",
+    "NA", "NR", "NP", "NC", "NZ", "NI", "NE", "NG", "NU", "NF", "MP", "OM", "PK", "PW", "PS",
+    "PA", "PG", "PY", "PE", "PH", "PN", "PR", "QA", "RE", "RW", "BL", "SH", "KN", "LC", "MF",
+    "PM", "VC", "WS", "ST", "SA", "SN", "SC", "SL", "SG", "SX", "SB", "SO", "ZA", "GS", "SS",
+    "LK", "SD", "SR", "SJ", "SY", "TW", "TJ", "TZ", "TH", "TL", "TG", "TK", "TO", "TT", "TN",
+    "TM", "TC", "TV", "UG", "AE", "UM", "US", "UY", "UZ", "VU", "VE", "VN", "VG", "VI", "WF",
+    "EH", "YE", "ZM", "ZW"
+]
+
 
 fields_dict = {
     "clinical_trials" : "abstract+acronym+active_years+altmetric+associated_grant_ids+brief_title+category_bra+category_for+category_for_2020+category_hra+category_hrcs_hc+category_hrcs_rac+category_icrp_cso+category_icrp_ct+category_rcdc+conditions+date_inserted+dimensions_url+end_date+funder_countries+funders+gender+id+interventions+investigators+linkout+mesh_terms+phase+publication_ids+publications+registry+research_orgs+researchers+score+start_date+study_arms+study_designs+study_eligibility_criteria+study_maximum_age+study_minimum_age+study_outcome_measures+study_participants+study_type+title",
@@ -65,7 +87,7 @@ def process_batch(s3_client, dimensions_client, data_type, country, year, checkp
         "clinical_trials" : f"(funder_countries=\"{country}\" and (start_date>=\"{str(year)}-01-01\" and start_date<=\"{str(year)}-12-31\"))",
         "datasets" : f"(funder_countries=\"{country}\" or research_org_countries=\"{country}\") and year={year}",
         "grants" : f"(funder_org_countries=\"{country}\" or research_org_countries=\"{country}\") and start_year={year}",
-        "patents" : f"(assignee_countries=\"{country}\" or jurisdiction=\"{country}\") and (date>=\"{start_date}\" and date<=\"{end_date}\"))",
+        "patents" : f"(assignee_countries=\"{country}\" or jurisdiction=\"{country}\") and (date>=\"{start_date}\" and date<=\"{end_date}\")",
         "policy_documents" : f"(publisher_org_country=\"{country}\" and year={year})",
         "publications" : f"(funder_countries=\"{country}\" or research_org_countries=\"{country}\") and (date>=\"{start_date}\" and date<=\"{end_date}\")",
         "reports" : f"(funder_orgs_countries=\"{country}\" or publisher_orgs_countries=\"{country}\" or research_org_countries=\"{country}\" or responsible_orgs_countries=\"{country}\") and year={year}",
@@ -74,7 +96,10 @@ def process_batch(s3_client, dimensions_client, data_type, country, year, checkp
 
     for attempt in range(max_retries):
         try:
-            query = f"search {data_type} where {conditions_dict[data_type]} return {data_type}[{fields_dict[data_type]}] limit {requests_per_batch} skip {checkpoint_data['types_progress'][data_type]['skip']}"
+            if data_type == "publications":
+                query = f"set return_all_keys search {data_type} where {conditions_dict[data_type]} return {data_type} limit {requests_per_batch} skip {checkpoint_data['types_progress'][data_type]['skip']}"    
+            else:
+                query = f"search {data_type} where {conditions_dict[data_type]} return {data_type}[{fields_dict[data_type]}] limit {requests_per_batch} skip {checkpoint_data['types_progress'][data_type]['skip']}"
             #logging.info(f"Querying {data_type} for {country}, {year} with query: \r\n{query}")
             data = dimensions_client.query(query)
 
@@ -104,7 +129,7 @@ def process_batch(s3_client, dimensions_client, data_type, country, year, checkp
             if start_date is None and end_date is None:
                 path = f"{data_type}/{data_type}_{country}_{year}_{checkpoint_data['types_progress'][data_type]['batch_number']}.jsonl"
             else:
-                path = f"{data_type}/{data_type}_{country}_{year}_{checkpoint_data['types_progress'][data_type]['batch_number']}_{start_date}_{end_date}.jsonl"
+                path = f"{data_type}/{data_type}_{country}_{year}_{start_date}_{end_date}_batch_{checkpoint_data['types_progress'][data_type]['batch_number']}.jsonl"
             s3_client.put_object(Body=jsonl_data, Bucket=bucket_name, Key=path)
             logging.info(f"Successfully uploaded {data_type}, batch {checkpoint_data['types_progress'][data_type]['batch_number']} to S3 at {path}")
             break  # Break out of retry loop if successful
@@ -207,6 +232,8 @@ for data_type in checkpoint_data["types_progress"]:
                     for start_date, end_date in monthly_date_ranges:
                         where_clause = f"date>='{start_date}' and date<='{end_date}'"
                         # Call process_batch with additional date range parameters
+                        # Something is going wrong here - it will iterate monthly THEN batchly, which somehow means that certain months with lots of patents won't be fully processed
+                        # need to treat the month as a unit, and process until completed
                         process_batch(s3_client=s3, dimensions_client=dsl, data_type=current_type, country=country, year=year, start_date=start_date, end_date=end_date, checkpoint_data=checkpoint_data, bucket_name=bucket_name)
 
                 else:     
